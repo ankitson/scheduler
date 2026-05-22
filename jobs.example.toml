@@ -1,0 +1,13 @@
+# Copy this to jobs.toml and edit. jobs.toml is gitignored (it holds your real paths).
+#
+# Each [[job]] is run via run_job.py (logging + retries) and can be registered as a
+# Windows scheduled task. workdir / log_dir are relative to this directory unless absolute.
+
+task_folder = "Scheduler"   # Task Scheduler folder the tasks are created under
+
+[[job]]
+name = "example-job"
+schedule = "every 3h"       # "every Nh" / "every Nm" (repeating) or "HH:MM" (daily)
+workdir = "../some-project" # working dir for the command
+command = ["uv", "run", "do_something.py", "--flag", "value"]
+# log_dir = "logs"          # optional; defaults to windows-scheduler/logs

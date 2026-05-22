@@ -1,0 +1,10 @@
+# Real config (use jobs.example.toml as the template)
+jobs.toml
+
+# Job logs + status files
+logs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
