@@ -62,6 +62,25 @@ def _log_dir(job: dict) -> Path:
     return _resolve(job["log_dir"]) if job.get("log_dir") else DEFAULT_LOG_DIR
 
 
+def _job_steps(job: dict) -> list[list[str]]:
+    # A job has either a single `command` or a list of `steps` (run in sequence).
+    if job.get("steps"):
+        return [list(s) for s in job["steps"]]
+    if job.get("command"):
+        return [list(job["command"])]
+    raise SystemExit(f"Job '{job.get('name')}' has neither 'command' nor 'steps'")
+
+
+def _run_job_remainder(job: dict) -> list[str]:
+    # Flatten steps into run_job.py's command tail, joined by the `;;` step separator.
+    remainder: list[str] = []
+    for i, step in enumerate(_job_steps(job)):
+        if i:
+            remainder.append(";;")
+        remainder += step
+    return remainder
+
+
 def _schedule_args(schedule: str) -> list[str]:
     # "HH:MM" -> daily at that time; "every Nh" / "every Nm" -> repeating interval.
     s = schedule.strip().lower()
@@ -84,7 +103,8 @@ def cmd_list(data: dict, args: argparse.Namespace) -> int:
     print(f"Jobs in {CONFIG}  (task folder: {data['task_folder']}):")
     for j in jobs:
         print(f"  - {j['name']}  @ {j.get('schedule', '(no schedule)')}  cwd={j.get('workdir', '.')}")
-        print(f"      {subprocess.list2cmdline(list(j['command']))}")
+        for step in _job_steps(j):
+            print(f"      {subprocess.list2cmdline(step)}")
     return 0
 
 
@@ -93,7 +113,7 @@ def cmd_run(data: dict, args: argparse.Namespace) -> int:
     argv = ["uv", "run", str(RUN_JOB), "--name", job["name"]]
     if job.get("log_dir"):
         argv += ["--log-dir", str(_log_dir(job))]
-    argv += ["--"] + list(job["command"])
+    argv += ["--"] + _run_job_remainder(job)
     return subprocess.run(argv, cwd=str(_resolve(job.get("workdir", ".")))).returncode
 
 
@@ -104,7 +124,7 @@ def _install_one(data: dict, job: dict) -> int:
     run_job_argv = ["run", str(RUN_JOB), "--name", job["name"]]
     if job.get("log_dir"):
         run_job_argv += ["--log-dir", str(_log_dir(job))]
-    run_job_argv += ["--"] + list(job["command"])
+    run_job_argv += ["--"] + _run_job_remainder(job)
     arg_string = subprocess.list2cmdline(run_job_argv)
 
     ps = [
@@ -136,10 +156,12 @@ def cmd_uninstall(data: dict, args: argparse.Namespace) -> int:
     names = [j["name"] for j in data["job"]] if args.all else [args.name]
     rc = 0
     for n in names:
+        # Unregister-ScheduledTask needs -TaskPath separately (it won't parse "folder\name").
         rc |= subprocess.run([
             "powershell", "-NoProfile", "-Command",
-            f"Unregister-ScheduledTask -TaskName '{folder}\\{n}' -Confirm:$false; "
-            f"Write-Output 'Removed {folder}\\{n}'",
+            f"try {{ Unregister-ScheduledTask -TaskPath '\\{folder}\\' -TaskName '{n}' "
+            f"-Confirm:$false -ErrorAction Stop; Write-Output 'Removed {folder}\\{n}' }} "
+            f"catch {{ Write-Output 'Not found: {folder}\\{n}' }}",
         ]).returncode
     return rc
 

@@ -2,12 +2,30 @@
 #
 # Each [[job]] is run via run_job.py (logging + retries) and can be registered as a
 # Windows scheduled task. workdir / log_dir are relative to this directory unless absolute.
+# A job has either a single `command` or a list of `steps` (run in sequence, stopping at
+# the first failure -- the whole job is one logged, retried unit).
 
 task_folder = "Scheduler"   # Task Scheduler folder the tasks are created under
 
+# Single-command job.
 [[job]]
 name = "example-job"
 schedule = "every 3h"       # "every Nh" / "every Nm" (repeating) or "HH:MM" (daily)
 workdir = "../some-project" # working dir for the command
 command = ["uv", "run", "do_something.py", "--flag", "value"]
 # log_dir = "logs"          # optional; defaults to windows-scheduler/logs
+
+# Chained job: export, then publish to <dest>/<uuid>/ + _READY for a downstream pipeline.
+# publish.py ships with windows-scheduler. Both steps run from this job's workdir.
+[[job]]
+name = "example-export"
+schedule = "every 3h"
+workdir = "../some-project"
+steps = [
+    ["uv", "run", "do_something.py", "--flag", "value"],
+    [
+        "uv", "run", "../windows-scheduler/publish.py",
+        "--src", "data/output",
+        "--dest", "C:/path/to/pipeline/landing",
+    ],
+]

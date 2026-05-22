@@ -77,6 +77,40 @@ def _run_once(
     return cp.returncode, time.monotonic() - start
 
 
+def _split_steps(command: list[str]) -> list[list[str]]:
+    # A job may chain several commands, separated by a `;;` token. Each runs in sequence.
+    steps: list[list[str]] = []
+    current: list[str] = []
+    for tok in command:
+        if tok == ";;":
+            if current:
+                steps.append(current)
+            current = []
+        else:
+            current.append(tok)
+    if current:
+        steps.append(current)
+    return steps
+
+
+def _run_steps(
+    steps: list[list[str]], timeout: float | None, logger: logging.Logger
+) -> tuple[int, float]:
+    # Run each step in sequence; stop at the first failure. Returns (exit_code, total_seconds).
+    total = 0.0
+    multi = len(steps) > 1
+    for i, step in enumerate(steps, 1):
+        if multi:
+            logger.info("- step %d/%d -", i, len(steps))
+        rc, dur = _run_once(step, timeout, logger)
+        total += dur
+        if rc != 0:
+            if multi:
+                logger.error("step %d/%d failed (exit=%d); skipping remaining steps", i, len(steps), rc)
+            return rc, total
+    return 0, total
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description="Run a command with retries, rotating logs, and a status file."
@@ -103,9 +137,13 @@ def main(argv: list[str]) -> int:
     if not command:
         parser.error("no command given; pass it after `--`, e.g. run_job.py --name x -- uv run script.py")
 
+    steps = _split_steps(command)
+    if not steps:
+        parser.error("no command given; pass it after `--`, e.g. run_job.py --name x -- uv run script.py")
+
     logger = _build_logger(args.name, args.log_dir, args.max_log_bytes, args.log_backups)
     max_attempts = max(1, args.retries + 1)
-    logger.info("=== job '%s' starting (max attempts: %d) ===", args.name, max_attempts)
+    logger.info("=== job '%s' starting (max attempts: %d, steps: %d) ===", args.name, max_attempts, len(steps))
 
     start_unix = int(time.time())
     rc = 1
@@ -114,7 +152,7 @@ def main(argv: list[str]) -> int:
     for attempt in range(1, max_attempts + 1):
         attempts_used = attempt
         logger.info("--- attempt %d/%d ---", attempt, max_attempts)
-        rc, dur = _run_once(command, args.timeout, logger)
+        rc, dur = _run_steps(steps, args.timeout, logger)
         logger.info("attempt %d finished: exit=%d (%.1fs)", attempt, rc, dur)
         if rc == 0:
             break
@@ -144,7 +182,7 @@ def main(argv: list[str]) -> int:
         "endUnix": end_unix,
         "durationSec": end_unix - start_unix,
         "lastRunIso": datetime.fromtimestamp(end_unix, tz=timezone.utc).isoformat(),
-        "command": command,
+        "steps": steps,
     }
     status_path = args.log_dir / f"{args.name}.status.json"
     status_path.write_text(json.dumps(status, indent=2) + "\n", encoding="utf-8")

@@ -5,10 +5,15 @@ are defined in `jobs.toml`; the projects being scheduled need know nothing about
 
 ## How it works
 
-- **`jobs.toml`** — declares each job (name, schedule, working dir, command).
+- **`jobs.toml`** — declares each job (name, schedule, working dir, and either a single
+  `command` or a list of `steps` run in sequence). A multi-step job is one logged, retried
+  unit and stops at the first failing step (e.g. export → publish).
 - **`scheduler.py`** — reads the config and orchestrates everything.
 - **`run_job.py`** — wraps each run with a rotating log + retries and writes a status file.
 - **`register_task.ps1`** — registers the Windows scheduled task (daily or repeating).
+- **`publish.py`** — bundled helper for exporter jobs: copies a directory into
+  `<dest>/<uuid>/` and touches a `_READY` sentinel so a downstream pipeline only picks
+  up complete drops. Use it as a job command: `uv run publish.py --src <export> --dest <landing>`.
 
 A scheduled task simply runs `run_job.py`, which runs the job's command. Logs and
 `<name>.status.json` land in `logs/` (override per-job with `log_dir`).
