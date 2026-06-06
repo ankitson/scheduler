@@ -4,7 +4,7 @@
 # ///
 """Generic job runner: runs a command with retries, rotating logs, and a status file.
 
-Intended to be invoked by Windows Task Scheduler so that each scheduled script gets
+Intended to be invoked by the native OS scheduler so that each scheduled script gets
 consistent logging and retry behaviour without baking it into the script itself.
 
 Usage:

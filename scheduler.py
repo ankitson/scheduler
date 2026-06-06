@@ -3,16 +3,18 @@
 # requires-python = ">=3.11"
 # dependencies = ["tomli-w"]
 # ///
-"""Config-driven Windows job scheduler.
+"""Config-driven native job scheduler.
 
 Reads jobs.toml and runs / schedules each job via run_job.py (logging + retries)
-and register_task.ps1 (Task Scheduler). Consuming projects need know nothing about
-this tool -- a project is simply one entry in jobs.toml.
+and the host OS scheduler. Consuming projects need know nothing about this tool --
+a project is simply one entry in jobs.toml.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -83,16 +85,38 @@ def _run_job_remainder(job: dict) -> list[str]:
 
 def _schedule_args(schedule: str) -> list[str]:
     # "HH:MM" -> daily at that time; "every Nh" / "every Nm" -> repeating interval.
+    kind, value = _schedule_kind(schedule)
+    if kind == "interval":
+        seconds = int(value)
+        unit = "h" if seconds % 3600 == 0 else "m"
+        n = str(seconds // (3600 if unit == "h" else 60))
+        return ["-IntervalHours", n] if unit == "h" else ["-IntervalMinutes", n]
+    hour, minute = value
+    return ["-At", f"{hour:02d}:{minute:02d}"]
+
+
+def _schedule_kind(schedule: str) -> tuple[str, int | tuple[int, int]]:
+    # Returns ("interval", seconds) or ("daily", (hour, minute)).
     s = schedule.strip().lower()
     m = re.fullmatch(r"every\s+(\d+)\s*([hm])", s)
     if m:
-        n, unit = m.group(1), m.group(2)
-        return ["-IntervalHours", n] if unit == "h" else ["-IntervalMinutes", n]
+        n, unit = int(m.group(1)), m.group(2)
+        return "interval", n * (3600 if unit == "h" else 60)
     if re.fullmatch(r"\d{1,2}:\d{2}", s):
-        return ["-At", schedule.strip()]
+        hour_s, minute_s = s.split(":", 1)
+        hour, minute = int(hour_s), int(minute_s)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return "daily", (hour, minute)
     raise SystemExit(
         f"Bad schedule '{schedule}'. Use 'HH:MM' (daily) or 'every Nh' / 'every Nm'."
     )
+
+
+def _run_job_argv(job: dict) -> list[str]:
+    argv = ["run", str(RUN_JOB), "--name", job["name"]]
+    if job.get("log_dir"):
+        argv += ["--log-dir", str(_log_dir(job))]
+    return argv + ["--"] + _run_job_remainder(job)
 
 
 def cmd_list(data: dict, args: argparse.Namespace) -> int:
@@ -110,22 +134,15 @@ def cmd_list(data: dict, args: argparse.Namespace) -> int:
 
 def cmd_run(data: dict, args: argparse.Namespace) -> int:
     job = _find(data, args.name)
-    argv = ["uv", "run", str(RUN_JOB), "--name", job["name"]]
-    if job.get("log_dir"):
-        argv += ["--log-dir", str(_log_dir(job))]
-    argv += ["--"] + _run_job_remainder(job)
+    argv = ["uv"] + _run_job_argv(job)
     return subprocess.run(argv, cwd=str(_resolve(job.get("workdir", ".")))).returncode
 
 
-def _install_one(data: dict, job: dict) -> int:
+def _install_one_windows(data: dict, job: dict) -> int:
     # Build the scheduled action ourselves: uv run run_job.py --name X [--log-dir L] -- <command>.
     # register_task.ps1 receives it as one already-quoted string, so PowerShell never has to
     # parse the command tokens (notably the `--` separator).
-    run_job_argv = ["run", str(RUN_JOB), "--name", job["name"]]
-    if job.get("log_dir"):
-        run_job_argv += ["--log-dir", str(_log_dir(job))]
-    run_job_argv += ["--"] + _run_job_remainder(job)
-    arg_string = subprocess.list2cmdline(run_job_argv)
+    arg_string = subprocess.list2cmdline(_run_job_argv(job))
 
     ps = [
         "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(REGISTER),
@@ -134,6 +151,69 @@ def _install_one(data: dict, job: dict) -> int:
     ]
     ps += _schedule_args(job["schedule"])
     return subprocess.run(ps).returncode
+
+
+def _launchd_domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def _launchd_label(data: dict, job_name: str) -> str:
+    parts = [data["task_folder"], job_name]
+    safe = ".".join(re.sub(r"[^A-Za-z0-9_-]+", "-", p).strip("-") for p in parts)
+    safe = re.sub(r"-{2,}", "-", safe).strip(".-") or "scheduler"
+    return f"local.scheduler.{safe}"
+
+
+def _launchd_plist_path(label: str) -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+
+
+def _launchd_program_arguments(job: dict) -> list[str]:
+    if shutil.which("uv") is None:
+        raise SystemExit("Cannot install launchd job: uv was not found on PATH.")
+    return [str(Path(UV).resolve())] + _run_job_argv(job)
+
+
+def _install_one_macos(data: dict, job: dict) -> int:
+    label = _launchd_label(data, job["name"])
+    plist_path = _launchd_plist_path(label)
+    log_dir = _log_dir(job)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+
+    schedule_kind, schedule_value = _schedule_kind(job["schedule"])
+    plist: dict[str, object] = {
+        "Label": label,
+        "ProgramArguments": _launchd_program_arguments(job),
+        "WorkingDirectory": str(_resolve(job.get("workdir", "."))),
+        "StandardOutPath": str(log_dir / f"{job['name']}.launchd.out.log"),
+        "StandardErrorPath": str(log_dir / f"{job['name']}.launchd.err.log"),
+    }
+    if schedule_kind == "interval":
+        plist["StartInterval"] = schedule_value
+    else:
+        hour, minute = schedule_value
+        plist["StartCalendarInterval"] = {"Hour": hour, "Minute": minute}
+
+    with plist_path.open("wb") as f:
+        plistlib.dump(plist, f, sort_keys=False)
+
+    subprocess.run(["launchctl", "bootout", _launchd_domain(), str(plist_path)], stderr=subprocess.DEVNULL)
+    rc = subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)]).returncode
+    if rc == 0:
+        print(f"Registered launchd agent: {label} ({job['schedule']})")
+        print(f"Plist: {plist_path}")
+        print(f"Working dir: {plist['WorkingDirectory']}")
+        print(f"Executes: {subprocess.list2cmdline(plist['ProgramArguments'])}")
+    return rc
+
+
+def _install_one(data: dict, job: dict) -> int:
+    if sys.platform == "win32":
+        return _install_one_windows(data, job)
+    if sys.platform == "darwin":
+        return _install_one_macos(data, job)
+    raise SystemExit(f"Install is only supported on Windows and macOS, not {sys.platform}.")
 
 
 def cmd_install(data: dict, args: argparse.Namespace) -> int:
@@ -152,6 +232,26 @@ def cmd_install(data: dict, args: argparse.Namespace) -> int:
 def cmd_uninstall(data: dict, args: argparse.Namespace) -> int:
     if not args.all and args.name is None:
         raise SystemExit("Specify a job name or --all")
+    if sys.platform == "darwin":
+        names = [j["name"] for j in data["job"]] if args.all else [args.name]
+        rc = 0
+        for n in names:
+            label = _launchd_label(data, n)
+            plist_path = _launchd_plist_path(label)
+            bootout = subprocess.run(
+                ["launchctl", "bootout", _launchd_domain(), str(plist_path)],
+                stderr=subprocess.DEVNULL,
+            )
+            if plist_path.exists():
+                plist_path.unlink()
+                print(f"Removed launchd agent: {label}")
+            else:
+                print(f"Not found: {plist_path}")
+            rc |= 0 if bootout.returncode in (0, 3, 36) else bootout.returncode
+        return rc
+    if sys.platform != "win32":
+        raise SystemExit(f"Uninstall is only supported on Windows and macOS, not {sys.platform}.")
+
     folder = data["task_folder"]
     names = [j["name"] for j in data["job"]] if args.all else [args.name]
     rc = 0
@@ -208,7 +308,7 @@ def cmd_remove(data: dict, args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str]) -> int:
-    p = argparse.ArgumentParser(description="Config-driven Windows job scheduler (jobs.toml).")
+    p = argparse.ArgumentParser(description="Config-driven native job scheduler (jobs.toml).")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("list", help="Show configured jobs.")

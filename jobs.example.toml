@@ -1,11 +1,12 @@
 # Copy this to jobs.toml and edit. jobs.toml is gitignored (it holds your real paths).
 #
-# Each [[job]] is run via run_job.py (logging + retries) and can be registered as a
-# Windows scheduled task. workdir / log_dir are relative to this directory unless absolute.
+# Each [[job]] is run via run_job.py (logging + retries) and can be registered with
+# the native scheduler: Windows Task Scheduler on Windows, launchd on macOS.
+# workdir / log_dir are relative to this directory unless absolute.
 # A job has either a single `command` or a list of `steps` (run in sequence, stopping at
 # the first failure -- the whole job is one logged, retried unit).
 
-task_folder = "Scheduler"   # Task Scheduler folder the tasks are created under
+task_folder = "Scheduler"   # Windows task folder; also used in macOS launchd labels
 
 # Single-command job.
 [[job]]
@@ -13,10 +14,10 @@ name = "example-job"
 schedule = "every 3h"       # "every Nh" / "every Nm" (repeating) or "HH:MM" (daily)
 workdir = "../some-project" # working dir for the command
 command = ["uv", "run", "do_something.py", "--flag", "value"]
-# log_dir = "logs"          # optional; defaults to windows-scheduler/logs
+# log_dir = "logs"          # optional; defaults to scheduler/logs
 
 # Chained job: export, then publish to <dest>/<uuid>/ + _READY for a downstream pipeline.
-# publish.py ships with windows-scheduler. Both steps run from this job's workdir.
+# publish.py ships with scheduler. Both steps run from this job's workdir.
 [[job]]
 name = "example-export"
 schedule = "every 3h"
@@ -24,8 +25,16 @@ workdir = "../some-project"
 steps = [
     ["uv", "run", "do_something.py", "--flag", "value"],
     [
-        "uv", "run", "../windows-scheduler/publish.py",
+        "uv", "run", "../scheduler/publish.py",
         "--src", "data/output",
         "--dest", "C:/path/to/pipeline/landing",
     ],
 ]
+
+# WSL job: workdir maps to /mnt/c/..., and `bash -lc` loads the login PATH so tools like
+# `just` are found. Quote the whole remote command as one argument.
+[[job]]
+name = "example-wsl"
+schedule = "every 3h"
+workdir = "../some-wsl-project"
+command = ["wsl", "-e", "bash", "-lc", "just fetch"]

@@ -1,4 +1,4 @@
-# windows-scheduler: config-driven Windows Task Scheduler jobs with logging + retries.
+# scheduler: config-driven native scheduled jobs with logging + retries.
 # All jobs live in jobs.toml. Consuming projects need know nothing about this tool.
 
 set windows-shell := ["powershell.exe", "-NoProfile", "-Command"]
@@ -15,7 +15,7 @@ jobs:
 run name:
     uv run scheduler.py run {{name}}
 
-# Register the Windows scheduled task for a job.
+# Register the native scheduled task for a job.
 install name:
     uv run scheduler.py install {{name}}
 
