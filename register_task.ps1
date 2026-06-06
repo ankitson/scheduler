@@ -23,7 +23,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$action = New-ScheduledTaskAction -Execute $ExePath -Argument $ArgString -WorkingDirectory $WorkDir
+# Run the command through `conhost --headless` so no console window pops up when the task
+# fires in the interactive session. conhost forwards the child to a headless pseudoconsole;
+# run_job.py still captures the child's output via pipes, so logging is unaffected.
+# Caveat: conhost always exits 0, so the task's "last run result" is not meaningful --
+# use `scheduler.py status <job>` (run_job.py's status.json) for real success/failure.
+$conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+$headlessArg = '--headless -- "' + $ExePath + '" ' + $ArgString
+$action = New-ScheduledTaskAction -Execute $conhost -Argument $headlessArg -WorkingDirectory $WorkDir
 
 if ($IntervalHours -gt 0 -or $IntervalMinutes -gt 0) {
     # Repeat indefinitely on a fixed interval, aligned to midnight so slots land on the clock.
@@ -57,4 +64,4 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Se
 
 Write-Output "Registered scheduled task: $taskName  ($when)"
 Write-Output "Working dir: $WorkDir"
-Write-Output "Executes: $ExePath $ArgString"
+Write-Output "Executes (headless): $conhost $headlessArg"

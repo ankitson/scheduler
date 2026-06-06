@@ -64,13 +64,38 @@ def _log_dir(job: dict) -> Path:
     return _resolve(job["log_dir"]) if job.get("log_dir") else DEFAULT_LOG_DIR
 
 
-def _job_steps(job: dict) -> list[list[str]]:
-    # A job has either a single `command` or a list of `steps` (run in sequence).
+PLATFORMS = ("windows", "darwin", "linux")
+
+
+def _platform_key() -> str:
+    # Friendly per-job override key matching jobs.toml: windows / darwin / linux.
+    return {"win32": "windows"}.get(sys.platform, sys.platform)
+
+
+def _steps_source(job: dict) -> dict | None:
+    # Per-platform override wins; else the top-level job; else None (skip on this platform).
+    # A dict-valued key that isn't a known platform is almost certainly a typo (e.g. macos.steps).
+    for key, val in job.items():
+        if isinstance(val, dict) and key not in PLATFORMS:
+            print(f"warning: job '{job.get('name')}' has unknown platform key '{key}'", file=sys.stderr)
+    block = job.get(_platform_key())
+    if isinstance(block, dict) and block.get("steps"):
+        return block
     if job.get("steps"):
-        return [list(s) for s in job["steps"]]
-    if job.get("command"):
-        return [list(job["command"])]
-    raise SystemExit(f"Job '{job.get('name')}' has neither 'command' nor 'steps'")
+        return job
+    return None
+
+
+def _job_steps(job: dict) -> list[list[str]]:
+    # A job runs a sequence of `steps`, each a command argv, in order, stopping at the first
+    # failure. A single command is just a one-element steps list. Steps may be scoped to the
+    # current platform via a [job.<platform>] block.
+    src = _steps_source(job)
+    if src is None:
+        raise SystemExit(
+            f"Job '{job.get('name')}' has no steps for platform '{_platform_key()}'."
+        )
+    return [list(s) for s in src["steps"]]
 
 
 def _run_job_remainder(job: dict) -> list[str]:
@@ -127,6 +152,9 @@ def cmd_list(data: dict, args: argparse.Namespace) -> int:
     print(f"Jobs in {CONFIG}  (task folder: {data['task_folder']}):")
     for j in jobs:
         print(f"  - {j['name']}  @ {j.get('schedule', '(no schedule)')}  cwd={j.get('workdir', '.')}")
+        if _steps_source(j) is None:
+            print(f"      (no steps for {_platform_key()})")
+            continue
         for step in _job_steps(j):
             print(f"      {subprocess.list2cmdline(step)}")
     return 0
@@ -225,6 +253,9 @@ def cmd_install(data: dict, args: argparse.Namespace) -> int:
         if not j.get("schedule"):
             print(f"skip '{j['name']}': no schedule set", file=sys.stderr)
             continue
+        if _steps_source(j) is None:
+            print(f"skip '{j['name']}': no steps for platform '{_platform_key()}'", file=sys.stderr)
+            continue
         rc |= _install_one(data, j)
     return rc
 
@@ -288,7 +319,8 @@ def cmd_add(data: dict, args: argparse.Namespace) -> int:
         command = command[1:]
     if not command:
         raise SystemExit("Provide the command to run after `--`")
-    job = {"name": args.name, "schedule": args.schedule, "workdir": args.workdir, "command": command}
+    # Stored as a one-element steps list -- a single command is just a 1-step job.
+    job = {"name": args.name, "schedule": args.schedule, "workdir": args.workdir, "steps": [command]}
     if args.log_dir:
         job["log_dir"] = args.log_dir
     data["job"].append(job)

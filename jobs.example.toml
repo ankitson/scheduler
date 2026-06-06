@@ -3,17 +3,23 @@
 # Each [[job]] is run via run_job.py (logging + retries) and can be registered with
 # the native scheduler: Windows Task Scheduler on Windows, launchd on macOS.
 # workdir / log_dir are relative to this directory unless absolute.
-# A job has either a single `command` or a list of `steps` (run in sequence, stopping at
-# the first failure -- the whole job is one logged, retried unit).
+# A job runs a list of `steps` in sequence, stopping at the first failure -- the whole job
+# is one logged, retried unit. Each step is a command as an argv list; a single-command job
+# is just a one-element steps list (e.g. steps = [["uv", "run", "x.py"]]).
+#
+# Steps can be scoped per platform with `windows.` / `darwin.` / `linux.` keys
+# (e.g. darwin.steps = [[...]] or windows.steps = [[...], [...]]). For a given platform the
+# steps resolve as: its platform key if present, else the top-level `steps`, else the job is
+# skipped on that platform. See "example-cross-platform" below.
 
 task_folder = "Scheduler"   # Windows task folder; also used in macOS launchd labels
 
-# Single-command job.
+# Single-step job (one command).
 [[job]]
 name = "example-job"
 schedule = "every 3h"       # "every Nh" / "every Nm" (repeating) or "HH:MM" (daily)
 workdir = "../some-project" # working dir for the command
-command = ["uv", "run", "do_something.py", "--flag", "value"]
+steps = [["uv", "run", "do_something.py", "--flag", "value"]]
 # log_dir = "logs"          # optional; defaults to scheduler/logs
 
 # Chained job: export, then publish to <dest>/<uuid>/ + _READY for a downstream pipeline.
@@ -37,4 +43,14 @@ steps = [
 name = "example-wsl"
 schedule = "every 3h"
 workdir = "../some-wsl-project"
-command = ["wsl", "-e", "bash", "-lc", "just fetch"]
+steps = [["wsl", "-e", "bash", "-lc", "just fetch"]]
+
+# Cross-platform job: different steps per OS. Here Linux has no entry, so the job is skipped
+# there. A top-level `steps` (none here) would act as the default for any platform without
+# its own key.
+[[job]]
+name = "example-cross-platform"
+schedule = "every 5m"
+workdir = "."
+darwin.steps = [["bash", "-lc", "do-something --out ~/data/out.json"]]
+windows.steps = [["powershell", "-NoProfile", "-Command", "do-something --out C:/data/out.json"]]
