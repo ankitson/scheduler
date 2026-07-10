@@ -197,8 +197,12 @@ def _launchd_plist_path(label: str) -> Path:
 
 
 def _launchd_program_arguments(job: dict) -> list[str]:
+    return _program_arguments(job)
+
+
+def _program_arguments(job: dict) -> list[str]:
     if shutil.which("uv") is None:
-        raise SystemExit("Cannot install launchd job: uv was not found on PATH.")
+        raise SystemExit("Cannot install scheduled job: uv was not found on PATH.")
     return [str(Path(UV).resolve())] + _run_job_argv(job)
 
 
@@ -236,12 +240,96 @@ def _install_one_macos(data: dict, job: dict) -> int:
     return rc
 
 
+def _systemd_user_dir() -> Path:
+    return Path.home() / ".config" / "systemd" / "user"
+
+
+def _systemd_unit_name(data: dict, job_name: str, suffix: str) -> str:
+    return f"{_launchd_label(data, job_name)}.{suffix}"
+
+
+def _systemd_unit_path(data: dict, job_name: str, suffix: str) -> Path:
+    return _systemd_user_dir() / _systemd_unit_name(data, job_name, suffix)
+
+
+def _systemd_quote_arg(arg: str) -> str:
+    # systemd expands percent specifiers in unit files; double them inside args.
+    arg = arg.replace("%", "%%")
+    if arg == "":
+        return '""'
+    if any(ch.isspace() or ch in '\\"' for ch in arg):
+        return '"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return arg
+
+
+def _systemd_quote_env(name: str, value: str) -> str:
+    # Environment= has its own parser; quote the complete NAME=value assignment.
+    value = value.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{name}={value}"'
+
+
+def _install_one_linux(data: dict, job: dict) -> int:
+    systemd_dir = _systemd_user_dir()
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+    service_name = _systemd_unit_name(data, job["name"], "service")
+    timer_name = _systemd_unit_name(data, job["name"], "timer")
+    service_path = _systemd_unit_path(data, job["name"], "service")
+    timer_path = _systemd_unit_path(data, job["name"], "timer")
+    log_dir = _log_dir(job)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    exec_start = " ".join(_systemd_quote_arg(arg) for arg in _program_arguments(job))
+    service = "\n".join(
+        [
+            "[Unit]",
+            f"Description=Scheduler job {job['name']}",
+            "",
+            "[Service]",
+            "Type=oneshot",
+            f"Environment={_systemd_quote_env('PATH', os.environ.get('PATH', os.defpath))}",
+            f"WorkingDirectory={_resolve(job.get('workdir', '.'))}",
+            f"ExecStart={exec_start}",
+            "",
+        ]
+    )
+
+    schedule_kind, schedule_value = _schedule_kind(job["schedule"])
+    timer_lines = [
+        "[Unit]",
+        f"Description=Timer for scheduler job {job['name']}",
+        "",
+        "[Timer]",
+        f"Unit={service_name}",
+        "Persistent=true",
+    ]
+    if schedule_kind == "interval":
+        timer_lines += ["OnBootSec=5m", f"OnUnitActiveSec={schedule_value}s"]
+    else:
+        hour, minute = schedule_value
+        timer_lines.append(f"OnCalendar=*-*-* {hour:02d}:{minute:02d}:00")
+    timer_lines += ["", "[Install]", "WantedBy=timers.target", ""]
+
+    service_path.write_text(service, encoding="utf-8")
+    timer_path.write_text("\n".join(timer_lines), encoding="utf-8")
+    rc = 0
+    rc |= subprocess.run(["systemctl", "--user", "daemon-reload"]).returncode
+    rc |= subprocess.run(["systemctl", "--user", "enable", "--now", timer_name]).returncode
+    if rc == 0:
+        print(f"Registered systemd user timer: {timer_name} ({job['schedule']})")
+        print(f"Timer: {timer_path}")
+        print(f"Service: {service_path}")
+        print(f"Executes: {subprocess.list2cmdline(_program_arguments(job))}")
+    return rc
+
+
 def _install_one(data: dict, job: dict) -> int:
     if sys.platform == "win32":
         return _install_one_windows(data, job)
     if sys.platform == "darwin":
         return _install_one_macos(data, job)
-    raise SystemExit(f"Install is only supported on Windows and macOS, not {sys.platform}.")
+    if sys.platform.startswith("linux"):
+        return _install_one_linux(data, job)
+    raise SystemExit(f"Install is only supported on Windows, macOS, and Linux, not {sys.platform}.")
 
 
 def cmd_install(data: dict, args: argparse.Namespace) -> int:
@@ -280,8 +368,30 @@ def cmd_uninstall(data: dict, args: argparse.Namespace) -> int:
                 print(f"Not found: {plist_path}")
             rc |= 0 if bootout.returncode in (0, 3, 36) else bootout.returncode
         return rc
+    if sys.platform.startswith("linux"):
+        names = [j["name"] for j in data["job"]] if args.all else [args.name]
+        rc = 0
+        for n in names:
+            timer_name = _systemd_unit_name(data, n, "timer")
+            timer_path = _systemd_unit_path(data, n, "timer")
+            service_path = _systemd_unit_path(data, n, "service")
+            disable = subprocess.run(
+                ["systemctl", "--user", "disable", "--now", timer_name],
+                stderr=subprocess.DEVNULL,
+            )
+            rc |= 0 if disable.returncode in (0, 1) else disable.returncode
+            removed = False
+            for path in (timer_path, service_path):
+                if path.exists():
+                    path.unlink()
+                    removed = True
+                    print(f"Removed systemd unit: {path}")
+            if not removed:
+                print(f"Not found: {timer_path} / {service_path}")
+        rc |= subprocess.run(["systemctl", "--user", "daemon-reload"]).returncode
+        return rc
     if sys.platform != "win32":
-        raise SystemExit(f"Uninstall is only supported on Windows and macOS, not {sys.platform}.")
+        raise SystemExit(f"Uninstall is only supported on Windows, macOS, and Linux, not {sys.platform}.")
 
     folder = data["task_folder"]
     names = [j["name"] for j in data["job"]] if args.all else [args.name]

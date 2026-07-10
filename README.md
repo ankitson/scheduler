@@ -7,6 +7,7 @@ Supported schedulers:
 
 - Windows: Task Scheduler
 - macOS: launchd LaunchAgents
+- Linux: systemd user timers
 
 ## How it works
 
@@ -49,10 +50,12 @@ just remove-job <name>
 On Windows, tasks use `StartWhenAvailable`, so a slot missed while the PC is asleep runs
 at the next wake (it does not wake the PC). On macOS, installed jobs are written to
 `~/Library/LaunchAgents/local.scheduler.<task_folder>.<job>.plist` and loaded into the
-current user's `launchd` GUI session. Windows repeating intervals are aligned to midnight;
-macOS repeating intervals are counted by launchd from the time the agent is loaded.
+current user's `launchd` GUI session. On Linux, installed jobs are written to
+`~/.config/systemd/user/local.scheduler.<task_folder>.<job>.{service,timer}` and enabled
+with `systemctl --user`. Windows repeating intervals are aligned to midnight; macOS and
+Linux repeating intervals are counted from when the agent/timer is loaded.
 
 ## Requirements
 
-- Windows or macOS + [`uv`](https://docs.astral.sh/uv/) on PATH
+- Windows, macOS, or Linux + [`uv`](https://docs.astral.sh/uv/) on PATH
 - [`just`](https://github.com/casey/just) (optional; recipes wrap `scheduler.py`)

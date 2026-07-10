@@ -1,7 +1,7 @@
 # Copy this to jobs.toml and edit. jobs.toml is gitignored (it holds your real paths).
 #
 # Each [[job]] is run via run_job.py (logging + retries) and can be registered with
-# the native scheduler: Windows Task Scheduler on Windows, launchd on macOS.
+# the native scheduler: Windows Task Scheduler, launchd on macOS, or systemd user timers on Linux.
 # workdir / log_dir are relative to this directory unless absolute.
 # A job runs a list of `steps` in sequence, stopping at the first failure -- the whole job
 # is one logged, retried unit. Each step is a command as an argv list; a single-command job
